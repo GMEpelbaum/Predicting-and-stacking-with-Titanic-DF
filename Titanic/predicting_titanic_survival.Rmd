@@ -1,0 +1,479 @@
+---
+title: "Análisis de Supervivencia en el Titanic"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  word_document: default
+---
+
+```{r}
+# --- Configuración Inicial ---
+# Defino las librerías necesarias
+required_packages <- c(
+  "readr", "pscl", "ggplot2", "dplyr", "purrr", "readxl",
+  "randomForest", "caret", "pROC", "stringr", "janitor", "pdp"
+)
+
+# Instalo las librerías faltantes que aún no están en mi entorno
+install_packages <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]
+if(length(install_packages)) install.packages(install_packages)
+
+# Cargo las librerías
+invisible(lapply(required_packages, library, character.only = TRUE))
+```
+
+
+```{r}
+# --- Comienzo del proyecto ---
+
+# Primero, cargo los datos del Titanic y los limpio un poco
+# Creo una función específica para leer y limpiar los datos del Titanic
+leer_y_limpiar_datos <- function(ruta_archivo) {
+  # Leo los datos desde el archivo CSV
+  base_titanic <- read_csv(ruta_archivo) %>%
+    clean_names() %>%
+    rename(
+      sobrevivio = survived,
+      clase = pclass,
+      edad = age,
+      nro_pasajero = passenger_id,
+      sexo = sex,
+      hermanos_a_bordo = sib_sp,
+      padres_hijos_en_el_barco = parch
+    ) %>%
+    mutate(
+      sexo = ifelse(sexo == "male", "Varón", "Mujer"),
+      sexo = factor(sexo, levels = c("Varón", "Mujer"))
+    ) %>%
+    # Selecciono solo las columnas necesarias para simplificar mi análisis
+    select(-c(ticket, embarked, cabin, name, fare))
+
+  # Elimino valores faltantes para asegurar que mi análisis sea preciso y no esté sesgado
+  base_titanic <- na.omit(base_titanic)
+
+  return(base_titanic)
+}
+
+# Leo los datos y aplico la limpieza
+basetitanic <- leer_y_limpiar_datos("./Data/titanic.csv")
+
+
+# Veo qué aspecto tienen los datos ahora
+head(basetitanic)
+```
+
+```{r}
+# Me aseguro de que los datos estén limpios y listos para trabajar.
+
+# --- Divido los datos en entrenamiento y prueba ---
+# Decido dividir los datos en dos conjuntos: uno para entrenamiento y otro para pruebas.
+# Esto me permite evaluar cómo funciona mi modelo con datos que no ha visto antes.
+dividir_datos <- function(datos, proporcion = 0.8) {
+  set.seed(123) # Uso una semilla para garantizar la reproducibilidad en mis resultados
+  indices_entrenamiento <- sample(nrow(datos), proporcion * nrow(datos))
+  conjunto_entrenamiento <- datos[indices_entrenamiento, ]
+  conjunto_prueba <- datos[-indices_entrenamiento, ]
+  
+  return(list(conjunto_entrenamiento = conjunto_entrenamiento,
+              conjunto_prueba = conjunto_prueba))
+}
+```
+
+
+```{r}
+# Divido los datos
+datos_divididos <- dividir_datos(basetitanic)
+conjunto_entrenamiento <- datos_divididos$conjunto_entrenamiento
+conjunto_prueba <- datos_divididos$conjunto_prueba
+
+# --- Convierto las variables ---
+# Convierto ciertas variables a factores o enteros para que mis modelos las entiendan mejor
+convertir_variables <- function(datos) {
+  datos <- datos %>%
+    mutate(clase = factor(clase),
+           hermanos_a_bordo = as.integer(hermanos_a_bordo),
+           padres_hijos_en_el_barco = as.integer(padres_hijos_en_el_barco),
+           sobrevivio = factor(sobrevivio, labels = c("No", "Sí")))
+  
+  return(datos)
+}
+
+# Convierto las variables en ambos conjuntos
+conjunto_entrenamiento <- convertir_variables(conjunto_entrenamiento)
+conjunto_prueba <- convertir_variables(conjunto_prueba)
+```
+
+
+```{r}
+# Exploración mejorada de la variable edad
+ggplot(basetitanic, aes(x = edad, fill = sobrevivio)) + 
+  geom_histogram(binwidth = 2, position = "dodge", color = "black") +  # Ajusto binwidth para que la edad incremente de 2 en 2
+  labs(title = "Distribución de Edad según Supervivencia",
+       x = "Edad",
+       y = "Frecuencia") +
+  scale_fill_manual(values = c("Sí" = "blue", "No" = "red")) +  # Defino colores para una mejor visualización
+  theme_minimal()  # Utilizo un tema minimalista para una presentación limpia
+
+```
+
+
+```{r}
+# --- Entreno los modelos ---
+# Entreno ambos modelos aquí y obtengo las predicciones para su posterior uso
+
+# Modelo Logístico
+modelo_logistico <- glm(sobrevivio ~ clase + sexo + edad + hermanos_a_bordo + padres_hijos_en_el_barco, 
+                        data = conjunto_entrenamiento,
+                        family = "binomial")
+```
+
+```{r}
+# Evaluación del modelo logístico
+summary(modelo_logistico)
+```
+##Intercepto (Intercept):
+
+Valor: 1.405292
+Interpretación: Este es el valor base del log-odds de supervivencia cuando todas las variables explicativas son 0. Aunque no tiene un significado práctico directo por sí solo, proporciona un punto de referencia para interpretar el impacto de las demás variables.
+Clase 2 (clase2):
+
+##Coeficiente: -1.308398
+Interpretación: Un coeficiente negativo para clase2 indica que estar en la segunda clase se asocia con una disminución en las probabilidades de supervivencia en comparación con la primera clase. Calculando el cambio en las probabilidades:
+Incremento del log-odds: exp(-1.308398) ≈ 0.270
+Interpretación en términos de probabilidades: Pasajeros en segunda clase tienen aproximadamente un 73% menos de probabilidades de sobrevivir (comparando con primera clase), manteniendo todo lo demás constante.
+Clase 3 (clase3):
+
+##Coeficiente: -2.452313
+Interpretación: Similar a clase2, pero con un efecto más fuerte. Estar en la tercera clase disminuye aún más las probabilidades de supervivencia comparado con la primera clase:
+Incremento del log-odds: exp(-2.452313) ≈ 0.086
+Las probabilidades de supervivencia son aproximadamente un 91% menores que para la primera clase.
+Sexo Mujer (sexoMujer):
+
+##Coeficiente: 2.563326
+Interpretación: Este coeficiente positivo indica que ser mujer está asociado con un aumento significativo en las probabilidades de supervivencia:
+Incremento del log-odds: exp(2.563326) ≈ 12.98
+Ser mujer multiplica por aproximadamente 13 veces las probabilidades de sobrevivir comparado con ser hombre, manteniendo otras variables constantes.
+Edad (edad):
+
+##Coeficiente: -0.039730
+Interpretación: La edad tiene un pequeño efecto negativo en las probabilidades de supervivencia:
+Incremento del log-odds por cada año: exp(-0.039730) ≈ 0.961
+Cada año adicional de edad reduce las probabilidades de supervivencia en aproximadamente un 4%.
+Hermanos a Bordo (hermanos_a_bordo):
+
+##Coeficiente: -0.335168
+Interpretación: Cada hermano adicional en el barco está asociado con una reducción en las probabilidades de supervivencia:
+Incremento del log-odds: exp(-0.335168) ≈ 0.715
+Cada hermano adicional disminuye las probabilidades de supervivencia en aproximadamente un 29%.
+Padres o Hijos a Bordo (padres_hijos_en_el_barco):
+
+##Coeficiente: -0.054599
+Interpretación: No es significativo. Esto sugiere que, basado en estos datos, no hay un efecto claro de esta variable sobre las probabilidades de supervivencia.
+
+##Cuando los coeficientes tienen p-valores (Pr(>|z|)) bajos, como 0.05 o menos, indica que estos son estadísticamente significativos. Esto significa que hay suficiente evidencia para sugerir que estos coeficientes no son cero, y así, es probable que tengan un efecto real sobre la variable de resultado (supervivencia, en este contexto).
+
+
+```{r}
+# Obtengo predicciones desde el modelo logístico para ambos conjuntos
+pred_logistico_train <- predict(modelo_logistico, newdata = conjunto_entrenamiento, type = "response")
+pred_logistico_test <- predict(modelo_logistico, newdata = conjunto_prueba, type = "response")
+```
+
+```{r}
+# Distribución de las predicciones del modelo logístico en el conjunto de entrenamiento
+hist(pred_logistico_train, breaks = 20, col = "lightblue", main = "Predicciones del Modelo Logístico (Entrenamiento)",
+     xlab = "Probabilidad de Supervivencia")
+
+# Distribución de las predicciones del modelo logístico en el conjunto de prueba
+hist(pred_logistico_test, breaks = 20, col = "lightcoral", main = "Predicciones del Modelo Logístico (Prueba)",
+     xlab = "Probabilidad de Supervivencia")
+
+```
+
+```{r}
+# Random Forest
+modelo_rf <- randomForest(sobrevivio ~ clase + sexo + edad + hermanos_a_bordo + padres_hijos_en_el_barco,
+                          data = conjunto_entrenamiento,
+                          ntree = 500,
+                          mtry = 3,
+                          importance = TRUE)
+```
+
+
+```{r}
+summary(modelo_rf)
+```
+
+```{r}
+print(modelo_rf)
+```
+
+```{r}
+# Predicciones en entrenamiento y prueba
+pred_rf_train <- predict(modelo_rf, newdata = conjunto_entrenamiento, type = "prob")[,2]
+pred_rf_test <- predict(modelo_rf, newdata = conjunto_prueba, type = "prob")[,2]
+
+# Visualización de la Importancia de las Variables
+varImpPlot(modelo_rf, main = "Importancia de las Variables en Random Forest")
+```
+
+
+```{r}
+# Visualización de las predicciones del modelo logístico
+pred_logistico <- predict(modelo_logistico, newdata = conjunto_prueba, type = "response")
+hist(pred_logistico, main = "Distribución de Predicciones del Modelo Logístico", 
+     xlab = "Probabilidad de Supervivencia")
+
+```
+
+```{r}
+# Random Forest
+# Utilizo un modelo de Random Forest para capturar interacciones complejas en los datos
+modelo_rf <- randomForest(sobrevivio ~ clase + sexo + edad + hermanos_a_bordo + padres_hijos_en_el_barco,
+                          data = conjunto_entrenamiento,
+                          ntree = 500,  # Decido usar 500 árboles para mejorar la estabilidad del modelo
+                          mtry = 3,     # Selecciono 3 variables aleatorias en cada división para equilibrar la precisión y la diversidad
+                          importance = TRUE)  # Solicito la importancia de las variables para investigar cuáles son más informativas
+
+
+```
+
+
+```{r}
+# Verifico la importancia de las variables y el error de predicción del modelo de Random Forest
+print(modelo_rf)
+```
+
+##OOB Error Rate: 19.09%
+Esta tasa indica que aproximadamente el 19.09% de las observaciones fueron clasificadas incorrectamente por el modelo. La estimación OOB es un proxy de la tasa de error en un conjunto de pruebas de validación no visto.
+##Matriz de Confusión
+
+##Interpretación de las Filas:
+
+Primera fila (No): De las 345 observaciones reales de la clase "No" (305 + 40), el modelo clasificó correctamente 305 como "No". Sin embargo, 40 fueron incorrectamente clasificados como "Sí".
+Segunda fila (Sí): De las 226 observaciones reales de la clase "Sí" (69 + 157), el modelo predijo correctamente 157 como "Sí", pero erróneamente 69 fueron clasificados como "No".
+Error por Clase (class.error):
+
+Para "No" (class.error = 0.1159420): Un 11.59% de los ejemplos de la clase "No" han sido mal clasificados como "Sí".
+Para "Sí" (class.error = 0.3053097): Un 30.53% de los ejemplos de la clase "Sí" han sido mal clasificados como "No". Este error es significativamente alto, mostrando que el modelo tiene más problemas para predicción de la clase "Sí".
+
+```{r}
+# Predicciones en el conjunto de prueba y evaluación
+pred_rf <- predict(modelo_rf, newdata = conjunto_prueba, type = "response")
+table(conjunto_prueba$sobrevivio, pred_rf > 0.5)
+```
+
+
+```{r}
+# Importancia de las variables en detalle
+importance(modelo_rf)
+varImpPlot(modelo_rf)
+# Evaluación del modelo Random Forest
+print(modelo_rf)
+```
+
+Sexo: Tiene valores considerablemente altos tanto en MeanDecreaseAccuracy como en MeanDecreaseGini, lo que sugiere que es una de las variables más importantes para predecir la supervivencia en este conjunto de datos. La diferencia significativa entre hombres y mujeres en tasas de supervivencia históricas está reflejada aquí.
+
+Clase: También se muestra como una variable influyente, especialmente reflejado en la importancia de disminución de Gini, indicando que es fundamental para la estructura de los árboles de decisión.
+
+Edad: Aunque tiene un impacto menor según la MeanDecreaseAccuracy, su MeanDecreaseGini sugiere que está ayudando en las divisiones de los nodos, señalando preferencias o límites en las edades de los sobrevivientes.
+
+Hermanos a Bordo: Tiene cierta importancia, pero notablemente menos que sexo o clase, con un valor negativo para "Sí", indicando posiblemente una complejidad o dificultad en predecir la clase "Sí" con esta variable.
+
+Padres e Hijos a Bordo: Muestra una baja importancia relativa en comparación con otras variables. Su baja contribución sugiere que este factor es menos determinante en el conjunto de decisiones de los árboles.
+
+
+Matriz de Confusión:
+La matriz de confusión muestra cómo el modelo clasifica correctamente los casos:
+
+No (no sobrevivió):
+
+Predice correctamente 306 personas como no sobrevivientes.
+Predice incorrectamente 39 personas como sobrevivientes.
+Error de clase (No): 11.3% de error al clasificar como No.
+Sí (sobrevivió):
+
+Predice incorrectamente 73 personas como no sobrevivientes.
+Predice correctamente 153 personas como sobrevivientes.
+Error de clase (Sí): 32.3% de error al clasificar como Sí.
+Este mayor error al predecir la clase "Sí" sugiere que el modelo podría estar sesgado hacia predecir que las personas no han sobrevivido, lo cual es común si esa fue la clase mayoritaria en los datos de entrenamiento.
+
+```{r}
+# --- Visualización de Predicciones del Modelo Logístico ---
+# Genero y visualizo las predicciones del conjunto de entrenamiento
+pred_logistico_train <- predict(modelo_logistico, newdata = conjunto_entrenamiento, type = "response")
+hist(pred_logistico_train, breaks = 20, col = "lightblue", main = "Predicciones del Modelo Logístico",
+     xlab = "Probabilidad de Supervivencia")
+```
+#El modelo tiene un rendimiento desigual entre las dos clases, funcionando mejor en la identificación de observaciones negativas (no sobrevivientes) que en identificar correctamente las positivas (sobrevivientes).
+
+```{r}
+# Predicciones del modelo logístico en el conjunto de entrenamiento
+pred_logistico_train <- predict(modelo_logistico, newdata = conjunto_entrenamiento, type = "response")
+
+# Predicciones del modelo Random Forest en el conjunto de entrenamiento
+pred_rf_train <- predict(modelo_rf, newdata = conjunto_entrenamiento, type = "prob")[, 2]
+
+# Visualización de las probabilidades predichas por Random Forest en el conjunto de entrenamiento
+hist(pred_rf_train, breaks = 20, col = "lightgreen", main = "Predicciones del Random Forest",
+     xlab = "Probabilidad de Supervivencia")
+```
+
+
+```{r}
+# --- Ensamblaje de Modelos (Stacking) ---
+# Creo un modelo meta utilizando las predicciones de mis dos modelos base: el modelo logístico y el Random Forest.
+
+# Predicciones del modelo logístico y Random Forest para el conjunto de entrenamiento
+# Las predicciones de estos modelos forman las características de entrada para el modelo de ensamblaje.
+train_meta <- data.frame(
+  pred_logistico = pred_logistico_train,
+  pred_rf = pred_rf_train,
+  sobrevivio = conjunto_entrenamiento$sobrevivio
+)
+
+# Entreno el modelo meta utilizando regresión logística
+# El modelo meta combina las predicciones de los modelos base para intentar mejorar la precisión general.
+modelo_meta <- glm(sobrevivio ~ ., data = train_meta, family = "binomial")
+
+# Visualizo las predicciones del modelo meta en el conjunto de entrenamiento
+# Ayuda a entender qué tan bien predice el modelo meta en los datos de entrenamiento.
+pred_meta_train <- predict(modelo_meta, newdata = train_meta, type = "response")
+hist(pred_meta_train, breaks = 20, col = "lightcoral", main = "Predicciones del Modelo Meta", xlab = "Probabilidad de Supervivencia")
+
+# --- Predicción Final y Evaluación ---
+# Realizo predicciones finales sobre el conjunto de prueba usando el modelo meta.
+
+# Genero las predicciones finales sobre el conjunto de prueba
+pred_rf_test <- predict(modelo_rf, newdata = conjunto_prueba, type = "prob")[, 2]
+test_meta <- data.frame(pred_logistico = pred_logistico_test, pred_rf = pred_rf_test)
+
+# Predicciones del modelo meta en el conjunto de prueba
+# Evalúo cuán bien el modelo de ensamblaje puede predecir resultados no vistos.
+predicciones_ensamble <- predict(modelo_meta, newdata = test_meta, type = "response")
+
+# Evalúo el modelo de ensamblaje usando una función que he creado
+evaluar_modelo <- function(predicciones, conjunto_prueba) {
+  # Convierte las probabilidades a clases finales usando un umbral de 0.5
+  # Esto permite que comparemos los resultados en términos de "Sí" o "No".
+  umbral <- 0.5
+  predicciones_finales <- ifelse(predicciones > umbral, "Sí", "No")
+
+  # Genero la matriz de confusión para observar las predicciones correctas e incorrectas
+  confusion_matrix <- table(Predicción = predicciones_finales, Realidad = conjunto_prueba$sobrevivio)
+  print(confusion_matrix)
+
+  # Creo y visualizo la curva ROC
+  # La curva ROC es útil para evaluar el rendimiento del modelo en varios umbrales de decisión.
+  roc_obj <- roc(conjunto_prueba$sobrevivio, predicciones)
+  plot(roc_obj, main = "Curva ROC para el Modelo de Ensamble", col = "blue", lwd = 2)
+
+  # Calculo y muestro el AUC para contextualizar el rendimiento del modelo
+  auc_value <- auc(roc_obj)
+  cat("El AUC para el modelo de ensamble es:", auc_value, "\n")
+}
+
+# Evaluación del modelo de ensamblaje en el conjunto de prueba
+evaluar_modelo(predicciones_ensamble, conjunto_prueba)
+
+# --- Visualización de Curvas ROC ---
+# Comparo las curvas ROC de los modelos para evaluar sus capacidades de discriminación
+
+# Defino las curvas ROC para cada modelo
+roc_rf <- roc(conjunto_prueba$sobrevivio, pred_rf_test)
+roc_logistico <- roc(conjunto_prueba$sobrevivio, pred_logistico_test)
+roc_meta <- roc(conjunto_prueba$sobrevivio, predicciones_ensamble)
+
+# Visualizo las Curvas ROC superpuestas para ver cómo se comparan los modelos
+plot(roc_rf, col = "blue", lwd = 2, main = "Curvas ROC para Modelos", xlim = c(0, 1), ylim = c(0, 1))
+lines(roc_logistico, col = "red", lwd = 2)
+lines(roc_meta, col = "green", lwd = 2)
+
+# Añadir una leyenda para identificar cada modelo
+legend("bottomright", legend = c("Random Forest", "Logístico", "Ensamble"),
+       col = c("blue", "red", "green"), lwd = 2, cex = 0.8)
+
+# Mostrar el AUC de cada modelo para tener una referencia cuantitativa de rendimiento
+auc_rf <- auc(roc_rf)
+auc_logistico <- auc(roc_logistico)
+auc_meta <- auc(roc_meta)
+
+cat("El AUC para el modelo Random Forest es:", auc_rf, "\n")
+cat("El AUC para el modelo Logístico es:", auc_logistico, "\n")
+cat("El AUC para el modelo Ensamble es:", auc_meta, "\n")
+
+
+
+```
+
+#El modelo de ensamble no mejora el AUC.
+
+```{r}
+# --- Instalación de Paquetes ---
+# Primero, instalo paquetes necesarios si no están ya instalados en mi entorno.
+required_packages <- c("xgboost", "keras", "tensorflow", "pROC")
+install_packages <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]
+if(length(install_packages)) install.packages(install_packages)
+
+# Cargo las librerías
+library(xgboost)
+library(keras)
+library(pROC)  # Cargar pROC para calcular AUC y visualizar curvas ROC.
+
+# --- XGBoost ---
+# Ahora, preparo los datos para XGBoost. Necesito asegurarme de que las variables categóricas sean convertidas adecuadamente.
+conjunto_entrenamiento$xClase <- as.numeric(factor(conjunto_entrenamiento$clase))
+conjunto_entrenamiento$xSexo <- as.numeric(factor(conjunto_entrenamiento$sexo))
+
+conjunto_prueba$xClase <- as.numeric(factor(conjunto_prueba$clase))
+conjunto_prueba$xSexo <- as.numeric(factor(conjunto_prueba$sexo))
+
+# Creo un conjunto de datos para XGBoost con columnas numéricas
+dtrain <- xgb.DMatrix(data = as.matrix(conjunto_entrenamiento[, c("xClase", "xSexo", "edad", "hermanos_a_bordo", "padres_hijos_en_el_barco")]), 
+                      label = as.numeric(conjunto_entrenamiento$sobrevivio) - 1)  # Convertir a 0 y 1
+
+# Buscando Hiperparámetros: Defino los parámetros del modelo
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  max_depth = 3,   # Normalmente ajusto este valor según mis datos
+  eta = 0.1        # La tasa de aprendizaje
+)
+
+# Entreno el modelo usando los datos preparados
+modelo_xgb <- xgb.train(params = params,
+                         data = dtrain,
+                         nrounds = 100)  # Establezco el número de iteraciones
+
+# --- Predicciones con el modelo XGBoost ---
+# Hago predicciones en el conjunto de prueba
+pred_xgb <- predict(modelo_xgb, newdata = xgb.DMatrix(as.matrix(conjunto_prueba[, c("xClase", "xSexo", "edad", "hermanos_a_bordo", "padres_hijos_en_el_barco")])))
+
+# --- Evaluación del Modelo ---
+# Transformo las probabilidades a clases
+umbral_xgb <- 0.5
+pred_clases_xgb <- ifelse(pred_xgb > umbral_xgb, "Sí", "No")
+
+# Evaluación con Matriz de Confusión
+confusion_matrix_xgb <- table(Predicción = pred_clases_xgb, Realidad = conjunto_prueba$sobrevivio)
+print(confusion_matrix_xgb)
+
+# Calculo y muestro la AUC de las predicciones de XGBoost
+roc_xgb <- roc(conjunto_prueba$sobrevivio, pred_xgb)
+plot(roc_xgb, main = "Curva ROC para XGBoost", col = "purple", lwd = 2)
+
+auc_xgb <- auc(roc_xgb)
+cat("El AUC para el modelo XGBoost es:", auc_xgb, "\n")
+
+```
+A partir de la matriz de confusión, puedo observar los siguientes puntos:
+
+Verdaderos Negativos (No, No): 74 predicciones correctas donde efectivamente se determinó que los pasajeros no sobrevivieron.
+Falsos Positivos (No, Sí): 18 predicciones incorrectas donde el modelo clasificó como sobrevivientes a aquellos que en realidad no lo fueron.
+Falsos Negativos (Sí, No): 5 predicciones incorrectas donde el modelo falló al clasificar a sobrevivientes como no sobrevivientes.
+Verdaderos Positivos (Sí, Sí): 46 predicciones correctas donde el modelo identificó correctamente a los sobrevivientes.
+
+En base a esta evaluación, el rendimiento del modelo XGBoost se refleja en su Área Bajo la Curva (AUC), que resultó ser 0.9133. Este valor indica que el modelo tiene un excelente poder de discriminación, siendo capaz de distinguir de manera efectiva entre las clases "Sí" (sobrevivientes) y "No" (no sobrevivientes). Un AUC de 0.9133 sugiere que el modelo realiza sus predicciones correctamente en aproximadamente el 91.33% de los casos, lo que es un indicador muy positivo de su efectividad.
+
+#Luego de aplicar distintos métodos y lograr un ensamble de los mismos, logramos predecir en un 91,33% si un pasajero sobrevirviría o no al naufragio del Titanic, antes de abordar el barco. 
